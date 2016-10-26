@@ -2,12 +2,12 @@ package Local::App::Calc;
 
 use strict;
 use IO::Socket;
-use Local::App::ProcessCalc;
+use FindBin;
+require "$FindBin::Bin/../lib/Local/Calculator/evaluate.pl";
+require "$FindBin::Bin/../lib/Local/Calculator/rpn.pl";
 
 #Определение обрабатываемых сигналов
-$SIG{__ALRM__} = sub {
-    new_one();
-};
+#$SIG{ALRM} = sub {die "Timeout"};
 
 sub start_server {
     # На вход получаем порт который будет слушать сервер занимающийся расчетами примеров
@@ -25,14 +25,13 @@ sub start_server {
 	or die "Can't create server on port $port : $@ $/";
 
 	while(my $client = $server->accept()){
-		my $msg_len;
-		if (sysread($client, $msg_len, 4) == 4){
-		    my $len = unpack 'L', $msg_len;
-			if (sysread($client, $msg_ex, $len) == $len) {
-				my $ex = unpack('a*', $msg_ex);
-				Local::App::ProcessCalc::multi_calc(10, $ex, $port)
-			} else die "Не могу прочесть сообщение";
-		} else die "Не могу прочесть сообщение";
+		$client->autoflush(1);
+		my $msg;
+		while (sysread($client, $msg, 4) == 4) {
+			my $len = unpack 'L', $msg;
+			die "Не могу прочесть сообщение" unless sysread($client, $msg, $len) == $len;
+			syswrite($client, pack('L/a*', calculate(unpack('a*', $msg))));
+		}
 		close( $client );
 	}
 	close( $server );
@@ -41,6 +40,14 @@ sub start_server {
 sub calculate {
     my $ex = shift;
     # На вход получаем пример, который надо обработать, на выход возвращаем результат
+    my $res;
+    eval {
+		my $rpn = rpn($ex);
+		$res = evaluate($rpn);
+	1} or do {
+		$res = "Error: $@";
+	};
+	return $res;
 }
 
 1;

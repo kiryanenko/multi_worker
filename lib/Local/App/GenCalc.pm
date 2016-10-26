@@ -2,6 +2,7 @@ package Local::App::GenCalc;
 
 use strict;
 use IO::Socket;
+use Time::HiRes qw/alarm/;
 
 my $file_path = './calcs.txt';
 
@@ -25,12 +26,11 @@ sub new_one {
     open(my $fh, ">>", $file_path) or die "Can't open >> $file_path: $!";
     print $fh $new_row;
     close($fh);
-    
     return;
 }
 
 #Определение обрабатываемых сигналов
-$SIG{__ALRM__} = sub {
+$SIG{ALRM} = sub {
     new_one();
 };
 
@@ -45,23 +45,24 @@ sub start_server {
 		LocalPort => $port,
 		Type      => SOCK_STREAM,
 		ReuseAddr => 1,
-		Listen    => 10) 
-	or die "Can't create server on port $port : $@ $/";
+		Listen    => 10
+	) or die "Can't create server on port $port : $@ $/";
 
-	alarm(100);
-	while(my $client = $server->accept()){
-		alarm(0);
-		my $msg_len;
-		if (sysread($client, $msg_len, 2) == 2){
-		    my $limit = unpack 'S', $msg_len;
-		    my $ex = get($limit);
-		    syswrite($client, pack('L', scalar($ex)), 4);
-		    while (@$ex) {
-		        syswrite($client, pack('L/a*', $_));
-		    }
+	new_one();
+	alarm(0.1);
+	while(1) {
+		if (my $client = $server->accept()) {
+			alarm(0);
+			my $msg_len;
+			if (sysread($client, $msg_len, 2) == 2) {
+				my $limit = unpack 'S', $msg_len;
+				my $ex = get($limit);
+				syswrite($client, pack('L(L/a*)*', scalar(@$ex), @$ex));
+			}
+			close( $client );
+			
 		}
-		close( $client );
-		alarm(100);
+		alarm(0.1);
 	}
 	close( $server );
 }
@@ -69,18 +70,27 @@ sub start_server {
 sub get {
     # На вход получаем кол-во запрашиваемых сообщений
     my $limit = shift;
-
     # Открытие файла, чтение N записей
     # Надо предусмотреть, что файла может не быть, а так же в файле может быть меньше сообщений чем запрошено
     my $ret = []; # Возвращаем ссылку на массив строк
     
-    open(my $fh, "<", $file_path) or die "Can't open >> $file_path: $!";
-    my $i = 0;
-    for(; $i < $limit && !eof($fh); $i++){
-    	push @$ret, <$fh>
+    open(my $fh, "<", $file_path) or die "Can't open < $file_path: $!";
+    for (my $i = 0; ($i < $limit) && !eof($fh); $i++) { 
+    	my $ex = <$fh>;
+    	push @$ret, chomp($ex); 
+    }
+	open(my $newFh, ">", "$file_path.temp") or die "Can't open > $file_path.temp: $!";
+	while (!eof($fh)) { 
+		my $str = <$fh>;
+		print $newFh $str; 
 	}
+	close($newFh);
     close($fh);
-    die "В файле меньше сообщений чем запрошено" unless $i == $limit;
+    
+    unlink($file_path);
+    rename("$file_path.temp", $file_path) or die "Не удалось переименовать $file_path.temp";
+    
+    #die "В файле меньше сообщений чем запрошено" unless $i == $limit;
 
     return $ret;
 }
