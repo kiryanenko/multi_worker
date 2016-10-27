@@ -30,7 +30,7 @@ sub start_server {
 		while (sysread($client, $msg, 4) == 4) {
 			my $len = unpack 'L', $msg;
 			die "Не могу прочесть сообщение" unless sysread($client, $msg, $len) == $len;
-			syswrite($client, pack('L/a*', calculate(unpack('a*', $msg))));
+			syswrite($client, pack('L/a*', calculate($msg)));
 		}
 		close( $client );
 	}
@@ -39,6 +39,7 @@ sub start_server {
 
 sub calculate {
     my $ex = shift;
+    
     # На вход получаем пример, который надо обработать, на выход возвращаем результат
     my $res;
     eval {

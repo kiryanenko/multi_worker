@@ -22,17 +22,17 @@ sub change_status {
 	
 	my $struct = {};
 	if (open(my $fh, '<', $status_file)) {
+		# Считываю структуру из status_file
   		my $json = <$fh>;
-use DDP;
-p $json;
     	my $decode_json = JSON::XS::decode_json($json);
 		$struct = $decode_json if defined $decode_json;
 		close $fh;
 	}
+	# Перезаписываю структуру в status_file
 	open(my $fh, '>', $status_file) or die "Не могу открыть > $status_file";
 	$struct->{$pid} = { cnt => 0 } unless exists $struct->{$pid};
 	$struct->{$pid}{status} = $status;
-	$struct->{$pid}{cnt}++ if $status eq 'DONE';
+	$struct->{$pid}{cnt}++ if $status eq 'done';
 	print $fh JSON::XS::encode_json($struct);
 	close $fh;
 }
@@ -42,7 +42,6 @@ sub multi_calc {
     my $fork_cnt = shift;  # кол-во паралельных потоков в котором мы будем обрабатывать задания
     my $jobs = shift; # пул заданий
     my $calc_port = shift; # порт на котором доступен сетевой калькулятор
-
     # расчитываем сколько заданий приходится на 1 обработчик
     my $cnt = scalar @$jobs;
     my $cnt_per_proc = ceil($cnt / $fork_cnt);
@@ -53,15 +52,20 @@ sub multi_calc {
     # в рамках одного обработчика делаем одно соединение с сервером обработки заданий, а в рамках этого соединение обрабатываем все задания
     # Исходящее и входящее сообщение имеет одинаковый формат 4-х байтовый инт + строка указанной длинны
     
+    unlink($status_file);	# Удаляю status_file
+    # change_status будет происходить в родительском процессе, т.к. в change_status 2 раза открывается файл, из-за этого нет гарантии, что файл не изменится между этими открытиями. Для этого связываю родительский и дочерние потоки
+    my ($r, $w);
+    pipe($r, $w);
     my @pids;
     for (my $i = 0; $i < $fork_cnt && $i < $cnt; $i++) {
-    	if (my $pid = fork()) {    		
+    	if (my $pid = fork()) {
     		push @pids, $pid;
     	} else {
     		die "Cannot fork $!" unless defined $pid;
-    		
-    		change_status($$, 'READY');
-    		my $socket = IO::Socket::INET->new(
+    		# Дочерний процесс
+    		close($r);
+    		syswrite($w, pack('SS/a*', $$, 'READY'));	# Передаю статус
+    		my $socket = IO::Socket::INET->new(			# Подключаюсь к серверу calc
 				PeerAddr => 'localhost',
 				PeerPort => $calc_port,
 				Proto => "tcp",
@@ -69,33 +73,47 @@ sub multi_calc {
 			) or die "Can`t connect $/";
 			
     		for (my $j = $i * $cnt_per_proc; ($j < $cnt_per_proc * ($i + 1)) && ($j < $cnt); $j++) {
-    			change_status($$, 'PROCESS');
-    			my $job = pack 'L/a*', @$jobs[$j];
-    			syswrite($socket, $job);
+    			syswrite($w, pack('SS/a*', $$, 'PROCESS'));		# Передаю статус
+    			syswrite($socket, pack('L/a*', @$jobs[$j]));	# Отправляю задачу на серв calc
+    			# Получаю ответ
     			my $answer;
     			die "Не могу прочесть размер сообщения" unless sysread($socket, $answer, 4) == 4;
 				my $len = unpack 'L', $answer;
-				die "Не могу прочесть сообщение" unless sysread($socket, $answer, $len) == $len;			open(my $fh, ">>", $result_file) or die "Can't open >> $result_file: $!";
-			    print $fh pack('SL/a*', $j, $answer);
+				die "Не могу прочесть сообщение" unless sysread($socket, $answer, $len) == $len;	
+				# Записываю результат в файл	
+				open(my $fh, ">>", $result_file) or die "Can't open >> $result_file: $!";
+			    syswrite($fh, pack('SL/a*', $j, $answer));
 			    close($fh);
-    			change_status($$, 'DONE');
+			    
+    			syswrite($w, pack('SS/a*', $$, 'done'));		# Передаю статус
     		}
-    		print $socket 'END';
+    		close($w);
     		exit;
     	}
     }
+    close($w);
+    # Родитель считывает статусы детей
+    my $msg;
+    while (sysread($r, $msg, 2) == 2) {
+    	my $pid = unpack 'S', $msg;
+    	die "Не могу прочесть размер статуса" unless sysread($r, $msg, 2) == 2;
+		my $len = unpack 'S', $msg;
+		die "Не могу прочесть статус" unless sysread($r, $msg, $len) == $len;
+		change_status($pid, $msg);
+    }
+    close($r);
     for (@pids) { waitpid($_, 0); }
     
     my $res = [];
     open(my $fh, "<", $result_file) or die "Can't open < $result_file: $!";
     while(!eof($fh)) {
     	my $msg;
-    	die "Не могу прочесть номер задания" unless sysread($fh, $msg, 2) == 2;
+    	die "Не могу прочесть номер задания" unless read($fh, $msg, 2) == 2;
     	my $j = unpack 'S', $msg;
-    	die "Не могу прочесть размер сообщения" unless sysread($fh, $msg, 4) == 4;
+    	die "Не могу прочесть размер сообщения" unless read($fh, $msg, 4) == 4;
 		my $len = unpack 'L', $msg;
-		die "Не могу прочесть сообщение" unless sysread($fh, $msg, $len) == $len;
-		@$res[$j] = unpack('a*', $msg);
+		die "Не могу прочесть сообщение" unless read($fh, $msg, $len) == $len;
+		@$res[$j] = $msg;
     }
     close($fh);
     unlink($result_file);
@@ -109,8 +127,6 @@ sub get_from_server {
     # На вход получаем порт, который слушает сервер, и кол-во заданий которое надо вернуть
     my $port = shift;
     my $limit = shift;
-use DDP; 
-p $port;
     # Создаём подключение к серверу
     my $socket = IO::Socket::INET->new(
 		PeerAddr => 'localhost',
@@ -119,9 +135,9 @@ p $port;
 		Type => SOCK_STREAM
 	) or die "Can`t connect $!";
     # Отправляем 2-х байтный int (кол-во сообщений которое мы от него просим)
-    # Получаем 4-х байтный int + последовательной сообщений состоящих их 4-х байтных интов + строк указанной длинны
     my $ret = [];
 	syswrite($socket, pack('S', $limit), 2);
+	# Получаем 4-х байтный int + последовательной сообщений состоящих их 4-х байтных интов + строк указанной длинны
 	my $msg;
 	die "Не могу прочесть количество сообщений" unless sysread($socket, $msg, 4) == 4;
 	my $cnt = unpack 'S', $msg;
@@ -129,7 +145,7 @@ p $port;
     	die "Не могу прочесть размер сообщения" unless sysread($socket, $msg, 4) == 4;
 		my $len = unpack 'L', $msg;
 		die "Не могу прочесть сообщение" unless sysread($socket, $msg, $len) == $len;
-		push @$ret, unpack('a*', $msg);
+		push @$ret, $msg;
 	}
     # Возвращаем ссылку на массив заданий
     return $ret;

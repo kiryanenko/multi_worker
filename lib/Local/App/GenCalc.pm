@@ -75,10 +75,13 @@ sub get {
     my $ret = []; # Возвращаем ссылку на массив строк
     
     open(my $fh, "<", $file_path) or die "Can't open < $file_path: $!";
+    # Считываю limit строк из file_path
     for (my $i = 0; ($i < $limit) && !eof($fh); $i++) { 
     	my $ex = <$fh>;
-    	push @$ret, chomp($ex); 
+    	chomp($ex);
+    	push @$ret, $ex; 
     }
+    # Чтобы удалить прочитанные строки из file_path - остальные строки отправляю во временный файл, а затем удаляю file_path и переименовываю временный файл в file_path
 	open(my $newFh, ">", "$file_path.temp") or die "Can't open > $file_path.temp: $!";
 	while (!eof($fh)) { 
 		my $str = <$fh>;
@@ -90,8 +93,6 @@ sub get {
     unlink($file_path);
     rename("$file_path.temp", $file_path) or die "Не удалось переименовать $file_path.temp";
     
-    #die "В файле меньше сообщений чем запрошено" unless $i == $limit;
-
     return $ret;
 }
 
