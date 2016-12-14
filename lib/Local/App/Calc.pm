@@ -7,7 +7,10 @@ require "$FindBin::Bin/../lib/Local/Calculator/evaluate.pl";
 require "$FindBin::Bin/../lib/Local/Calculator/rpn.pl";
 
 #Определение обрабатываемых сигналов
-#$SIG{ALRM} = sub {die "Timeout"};
+$SIG{CHLD} = "IGNORE";
+
+my $receiver_count = 0;
+my $max_receiver = 20;
 
 sub start_server {
     # На вход получаем порт который будет слушать сервер занимающийся расчетами примеров
@@ -25,12 +28,27 @@ sub start_server {
 	or die "Can't create server on port $port : $@ $/";
 
 	while(my $client = $server->accept()){
-		$client->autoflush(1);
-		my $msg;
-		while (sysread($client, $msg, 4) == 4) {
-			my $len = unpack 'L', $msg;
-			die "Не могу прочесть сообщение" unless sysread($client, $msg, $len) == $len;
-			syswrite($client, pack('L/a*', calculate($msg)));
+		if ($receiver_count < $max_receiver) {
+			my $child = fork();
+			if ($child) {
+				$receiver_count++;
+			} else {
+				die "Can't fork: $!" unless defined $child;
+				close($server);
+				$client->autoflush(1);
+	
+				my $msg;
+				while (sysread($client, $msg, 4) == 4) {
+					my $len = unpack 'L', $msg;
+					die "Не могу прочесть сообщение" unless sysread($client, $msg, $len) == $len;
+					syswrite($client, pack('L/a*', calculate($msg)));
+				}
+			
+				close( $client );
+				exit;
+			}
+		} else {
+			warn 'Количество принимающих форков вышло за пределы допустимого';
 		}
 		close( $client );
 	}

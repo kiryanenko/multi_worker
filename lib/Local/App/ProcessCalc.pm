@@ -4,6 +4,7 @@ use strict;
 use warnings;
 use JSON::XS;
 use IO::Socket;
+use Fcntl qw (:flock);
  
 our $VERSION = '1.0';
 
@@ -15,25 +16,30 @@ $SIG{INT} = sub {
 	unlink($status_file);
 	exit;
 };
+$SIG{CHLD} = "IGNORE";
 
 sub change_status {
 	my $pid = shift;
 	my $status = shift;
 	
 	my $struct = {};
-	if (open(my $fh, '<', $status_file)) {
-		# Считываю структуру из status_file
-  		my $json = <$fh>;
-    	my $decode_json = JSON::XS::decode_json($json);
-		$struct = $decode_json if defined $decode_json;
-		close $fh;
-	}
+	open(my $fh, '+<', $status_file) or die "Не могу открыть > $status_file";
+	flock($fh, LOCK_EX) or die "can't flock: $!";
+	# Считываю структуру из status_file
+	$/ = undef;
+	my $json = <$fh>;
+	$/ = "\n";
+   	my $decode_json = JSON::XS::decode_json($json);
+	$struct = $decode_json if defined $decode_json;
+	
 	# Перезаписываю структуру в status_file
-	open(my $fh, '>', $status_file) or die "Не могу открыть > $status_file";
+	seek($fh, 0, 0);
 	$struct->{$pid} = { cnt => 0 } unless exists $struct->{$pid};
 	$struct->{$pid}{status} = $status;
 	$struct->{$pid}{cnt}++ if $status eq 'done';
 	print $fh JSON::XS::encode_json($struct);
+	
+	truncate($fh, tell($fh));
 	close $fh;
 }
 
@@ -52,28 +58,27 @@ sub multi_calc {
     # в рамках одного обработчика делаем одно соединение с сервером обработки заданий, а в рамках этого соединение обрабатываем все задания
     # Исходящее и входящее сообщение имеет одинаковый формат 4-х байтовый инт + строка указанной длинны
     
-    unlink($status_file);	# Удаляю status_file
-    # change_status будет происходить в родительском процессе, т.к. в change_status 2 раза открывается файл, из-за этого нет гарантии, что файл не изменится между этими открытиями. Для этого связываю родительский и дочерние потоки
-    my ($r, $w);
-    pipe($r, $w);
-    my @pids;
+    open(my $fh, '>', $status_file) or die "Не могу открыть > $status_file";	# Очищаю status_file
+    print $fh JSON::XS::encode_json({});
+    close $fh;
+
+	my @pids;
     for (my $i = 0; $i < $fork_cnt && $i < $cnt; $i++) {
     	if (my $pid = fork()) {
     		push @pids, $pid;
     	} else {
     		die "Cannot fork $!" unless defined $pid;
     		# Дочерний процесс
-    		close($r);
-    		syswrite($w, pack('SS/a*', $$, 'READY'));	# Передаю статус
-    		my $socket = IO::Socket::INET->new(			# Подключаюсь к серверу calc
+    		change_status($$, 'READY');				# Передаю статус
+    		my $socket = IO::Socket::INET->new(		# Подключаюсь к серверу calc
 				PeerAddr => 'localhost',
 				PeerPort => $calc_port,
 				Proto => "tcp",
 				Type => SOCK_STREAM
-			) or die "Can`t connect $/";
+			) or die "Can`t connect $!";
 			
     		for (my $j = $i * $cnt_per_proc; ($j < $cnt_per_proc * ($i + 1)) && ($j < $cnt); $j++) {
-    			syswrite($w, pack('SS/a*', $$, 'PROCESS'));		# Передаю статус
+    			change_status($$, 'PROCESS');					# Передаю статус
     			syswrite($socket, pack('L/a*', @$jobs[$j]));	# Отправляю задачу на серв calc
     			# Получаю ответ
     			my $answer;
@@ -85,27 +90,16 @@ sub multi_calc {
 			    syswrite($fh, pack('SL/a*', $j, $answer));
 			    close($fh);
 			    
-    			syswrite($w, pack('SS/a*', $$, 'done'));		# Передаю статус
+    			change_status($$, 'done');		# Передаю статус
     		}
-    		close($w);
     		exit;
     	}
     }
-    close($w);
-    # Родитель считывает статусы детей
-    my $msg;
-    while (sysread($r, $msg, 2) == 2) {
-    	my $pid = unpack 'S', $msg;
-    	die "Не могу прочесть размер статуса" unless sysread($r, $msg, 2) == 2;
-		my $len = unpack 'S', $msg;
-		die "Не могу прочесть статус" unless sysread($r, $msg, $len) == $len;
-		change_status($pid, $msg);
-    }
-    close($r);
+    # Жду завершения дочерних процессов
     for (@pids) { waitpid($_, 0); }
     
     my $res = [];
-    open(my $fh, "<", $result_file) or die "Can't open < $result_file: $!";
+    open($fh, "<", $result_file) or die "Can't open < $result_file: $!";
     while(!eof($fh)) {
     	my $msg;
     	die "Не могу прочесть номер задания" unless read($fh, $msg, 2) == 2;
